@@ -1,19 +1,21 @@
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  PermissionsBitField,
-  ChannelType
+const { 
+  Client, 
+  GatewayIntentBits, 
+  Partials, 
+  ActionRowBuilder, 
+  ButtonBuilder, 
+  ButtonStyle, 
+  PermissionsBitField, 
+  ChannelType 
 } = require("discord.js");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildVoiceStates
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
   ],
   partials: [Partials.Channel]
 });
@@ -108,8 +110,8 @@ client.on("interactionCreate", async interaction => {
     await text.send({
       content:
         `<@&${role.id}>\n\n` +
-        `**Team 1:**\n${team1.map(m => m.displayName).join("\n")}\n\n` +
-        `**Team 2:**\n${team2.map(m => m.displayName).join("\n")}`,
+        `**Team 1:**\n${team1.map(m => getBaseNick(m)).join("\n")}\n\n` +
+        `**Team 2:**\n${team2.map(m => getBaseNick(m)).join("\n")}`,
       components: [buttons]
     });
 
@@ -120,7 +122,8 @@ client.on("interactionCreate", async interaction => {
       team1,
       team2,
       originalVC: vc,
-      tempVCs: []
+      tempVCs: [],
+      draftId
     });
 
     return interaction.reply({ content: "✅ Draft created.", ephemeral: true });
@@ -141,8 +144,8 @@ client.on("interactionCreate", async interaction => {
     await draft.text.bulkDelete(5).catch(() => {});
     return draft.text.send({
       content:
-        `**Team 1:**\n${draft.team1.map(m => m.displayName).join("\n")}\n\n` +
-        `**Team 2:**\n${draft.team2.map(m => m.displayName).join("\n")}`,
+        `**Team 1:**\n${draft.team1.map(m => getBaseNick(m)).join("\n")}\n\n` +
+        `**Team 2:**\n${draft.team2.map(m => getBaseNick(m)).join("\n")}`,
       components: interaction.message.components
     });
   }
@@ -152,14 +155,14 @@ client.on("interactionCreate", async interaction => {
     const cat = draft.text.parent;
 
     const t1VC = await guild.channels.create({
-      name: `Team 1 VC Draft`,
+      name: `Team 1 VC Draft ${draft.draftId}`,
       type: ChannelType.GuildVoice,
       parent: cat?.id,
       userLimit: draft.team1.length
     });
 
     const t2VC = await guild.channels.create({
-      name: `Team 2 VC Draft`,
+      name: `Team 2 VC Draft ${draft.draftId}`,
       type: ChannelType.GuildVoice,
       parent: cat?.id,
       userLimit: draft.team2.length
@@ -196,11 +199,14 @@ client.on("interactionCreate", async interaction => {
       }
     }
 
+    // Return everyone to original VC
     for (const p of [...draft.team1, ...draft.team2]) {
       await p.voice.setChannel(draft.originalVC).catch(() => {});
     }
 
+    // Delete draft VCs
     for (const vc of draft.tempVCs) await vc.delete().catch(() => {});
+    // Delete draft channel and role
     await draft.text.delete().catch(() => {});
     await draft.role.delete().catch(() => {});
     drafts.delete(draft.originalVC.id);
@@ -211,3 +217,4 @@ client.on("interactionCreate", async interaction => {
 
 // ---------- LOGIN ----------
 client.login(process.env.TOKEN);
+
