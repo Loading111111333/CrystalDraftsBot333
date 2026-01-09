@@ -1,22 +1,23 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
-  Partials, 
-  ActionRowBuilder, 
-  ButtonBuilder, 
-  ButtonStyle, 
-  PermissionsBitField, 
-  ChannelType 
+const {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  PermissionsBitField,
+  ChannelType,
+  EmbedBuilder
 } = require("discord.js");
-const express = require("express");
-
-// Keep-alive server for Replit
-const app = express();
-app.get("/", (_, res) => res.send("Bot is alive!"));
-app.listen(process.env.PORT || 5000, () => console.log("Keep-alive server running"));
 
 // ================= SETTINGS =================
 const HOST_ROLE_NAME = "Trusted Draft Host";
+const DRAFT_ALERTS_CHANNEL = "drafts-alerts";
+const DRAFT_HOST_CHANNEL = "drafts-host";
+
+// Team Colors
+const TEAM1_COLOR = 0x3498db; // Blue
+const TEAM2_COLOR = 0xe74c3c; // Red
 // ===========================================
 
 const client = new Client({
@@ -30,7 +31,7 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// Map drafts by text channel ID
+// Active drafts per VC
 const drafts = new Map();
 
 // ---------- HELPERS ----------
@@ -58,20 +59,20 @@ client.on("interactionCreate", async interaction => {
   const guild = interaction.guild;
   const member = interaction.member;
 
-  // ---------- HOST CHECK ----------
-  if (!member.roles.cache.some(r => r.name === HOST_ROLE_NAME) && member.id !== guild.ownerId) {
-    return interaction.reply({ content: "❌ Only Trusted Draft Host can use this.", ephemeral: true });
-  }
+  const isHost =
+    member.roles.cache.some(r => r.name === HOST_ROLE_NAME) ||
+    member.id === guild.ownerId;
 
   // ---------- RANDOM TEAMS ----------
   if (interaction.customId === "random_teams") {
     const vc = member.voice.channel;
     if (!vc) return interaction.reply({ content: "❌ Join a VC first.", ephemeral: true });
-    if ([...drafts.values()].some(d => d.vc.id === vc.id)) 
-      return interaction.reply({ content: "❌ Draft already active in this VC.", ephemeral: true });
+    if (drafts.has(vc.id))
+      return interaction.reply({ content: "❌ Draft already active here.", ephemeral: true });
 
     const players = [...vc.members.values()];
-    if (players.length < 2) return interaction.reply({ content: "❌ Not enough players in VC.", ephemeral: true });
+    if (players.length < 2)
+      return interaction.reply({ content: "❌ Not enough players.", ephemeral: true });
 
     players.sort(() => Math.random() - 0.5);
     const half = Math.ceil(players.length / 2);
@@ -80,104 +81,149 @@ client.on("interactionCreate", async interaction => {
 
     const draftId = Math.floor(Math.random() * 9999);
 
-    // Create draft role
-    const draftRole = await guild.roles.create({
+    const role = await guild.roles.create({
       name: `draft-${draftId}`,
-      reason: "Draft role for temporary access"
+      reason: "Draft access"
     });
-    for (const p of players) await p.roles.add(draftRole);
 
-    // Save original VC of each member
-    const originalVCs = {};
-    for (const p of players) originalVCs[p.id] = p.voice.channelId;
+    for (const p of players) await p.roles.add(role);
 
-    // Draft text channel
-    const category = guild.channels.cache.find(c => c.type === ChannelType.GuildCategory && c.name.includes("Community"));
-    const draftText = await guild.channels.create({
+    const category = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildCategory && c.name.includes("Community")
+    );
+
+    const text = await guild.channels.create({
       name: `draft-${draftId}`,
       type: ChannelType.GuildText,
       parent: category?.id,
       permissionOverwrites: [
         { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-        { id: draftRole.id, allow: [PermissionsBitField.Flags.ViewChannel] }
+        { id: role.id, allow: [PermissionsBitField.Flags.ViewChannel] }
       ]
     });
 
     const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("start_game").setLabel("▶️ Start Game").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId("start").setLabel("▶️ Start Game").setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId("shuffle").setLabel("🔀 Shuffle").setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId("t1_win").setLabel("🏆 Team 1 Wins").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("t2_win").setLabel("🏆 Team 2 Wins").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId("end_game").setLabel("❌ End Game").setStyle(ButtonStyle.Danger)
+      new ButtonBuilder().setCustomId("t1").setLabel("🏆 Team 1 Wins").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("t2").setLabel("🏆 Team 2 Wins").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("end").setLabel("❌ End Game").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId("request_players").setLabel("📢 Request Players").setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId("request_host").setLabel("🧑‍✈️ Request Host").setStyle(ButtonStyle.Primary)
     );
 
-    await draftText.send({
+    await text.send({
       content:
-        `<@&${draftRole.id}>\n\n**Team 1:**\n${team1.map(m => getBaseNick(m)).join("\n")}\n\n**Team 2:**\n${team2.map(m => getBaseNick(m)).join("\n")}`,
+        `<@&${role.id}>\n\n` +
+        `**Team 1:**\n${team1.map(m => m.displayName).join("\n")}\n\n` +
+        `**Team 2:**\n${team2.map(m => m.displayName).join("\n")}`,
       components: [buttons]
     });
 
-    drafts.set(draftText.id, {
+    drafts.set(vc.id, {
       vc,
-      draftRole,
-      draftText,
+      role,
+      text,
       team1,
       team2,
-      originalVCs,
-      tempVCs: [],
-      draftId,
-      host: member.user.id, // store host ID for button checks
-      vcCount: 1
+      originalVC: vc,
+      tempVCs: []
     });
 
     return interaction.reply({ content: "✅ Draft created.", ephemeral: true });
   }
 
-  // ---------- DRAFT ACTIONS ----------
-  const draft = drafts.get(interaction.channel.id);
-  if (!draft) return interaction.reply({ content: "❌ No active draft here.", ephemeral: true });
+  const draft = [...drafts.values()].find(d => d.text.id === interaction.channel.id);
 
-  // ---------- BUTTON HOST CHECK ----------
-  if (member.id !== draft.host && member.id !== guild.ownerId) {
-    return interaction.reply({ content: "❌ Only the draft host can use these buttons.", ephemeral: true });
+  // ---------- REQUEST PLAYERS ----------
+  if (interaction.customId === "request_players") {
+    const vc = member.voice.channel;
+    if (!vc) return interaction.reply({ content: "❌ Join a VC first.", ephemeral: true });
+
+    const alertsChannel = guild.channels.cache.find(
+      c => c.name === DRAFT_ALERTS_CHANNEL && c.type === ChannelType.GuildText
+    );
+
+    const invite = await vc.createInvite({ maxAge: 0, maxUses: 0 });
+
+    const embed = new EmbedBuilder()
+      .setTitle("📢 Draft Player Request")
+      .setDescription(`${member} requested players for a draft`)
+      .addFields({ name: "🎙️ Voice Channel", value: invite.url })
+      .setColor(0x2ecc71)
+      .setTimestamp();
+
+    await alertsChannel.send({ embeds: [embed] });
+    return interaction.reply({ content: "✅ Player request sent.", ephemeral: true });
   }
 
-  // Shuffle
+  // ---------- REQUEST HOST ----------
+  if (interaction.customId === "request_host") {
+    const vc = member.voice.channel;
+    if (!vc) return interaction.reply({ content: "❌ Join a VC first.", ephemeral: true });
+
+    const hostChannel = guild.channels.cache.find(
+      c => c.name === DRAFT_HOST_CHANNEL && c.type === ChannelType.GuildText
+    );
+
+    const hostRole = guild.roles.cache.find(r => r.name === HOST_ROLE_NAME);
+    const invite = await vc.createInvite({ maxAge: 0, maxUses: 0 });
+
+    const embed = new EmbedBuilder()
+      .setTitle("🧑‍✈️ Draft Host Request")
+      .setDescription(`${member} requested a host for this draft`)
+      .addFields({ name: "🎙️ Voice Channel", value: invite.url })
+      .setColor(0xf1c40f)
+      .setTimestamp();
+
+    await hostChannel.send({
+      content: hostRole ? `<@&${hostRole.id}>` : "",
+      embeds: [embed]
+    });
+
+    return interaction.reply({ content: "✅ Host request sent.", ephemeral: true });
+  }
+
+  if (!draft) return interaction.reply({ content: "❌ No active draft here.", ephemeral: true });
+  if (!isHost && ["start", "shuffle", "t1", "t2", "end"].includes(interaction.customId))
+    return interaction.reply({ content: "❌ Host only.", ephemeral: true });
+
+  // ---------- SHUFFLE ----------
   if (interaction.customId === "shuffle") {
-    const allPlayers = [...draft.team1, ...draft.team2].sort(() => Math.random() - 0.5);
-    const half = Math.ceil(allPlayers.length / 2);
-    draft.team1 = allPlayers.slice(0, half);
-    draft.team2 = allPlayers.slice(half);
+    const all = [...draft.team1, ...draft.team2].sort(() => Math.random() - 0.5);
+    const half = Math.ceil(all.length / 2);
+    draft.team1 = all.slice(0, half);
+    draft.team2 = all.slice(half);
 
     await interaction.deferUpdate();
-    await draft.draftText.bulkDelete(5).catch(() => {});
-    return draft.draftText.send({
+    await draft.text.bulkDelete(5).catch(() => {});
+    return draft.text.send({
       content:
-        `<@&${draft.draftRole.id}>\n\n**Team 1:**\n${draft.team1.map(m => getBaseNick(m)).join("\n")}\n\n**Team 2:**\n${draft.team2.map(m => getBaseNick(m)).join("\n")}`,
+        `**Team 1:**\n${draft.team1.map(m => m.displayName).join("\n")}\n\n` +
+        `**Team 2:**\n${draft.team2.map(m => m.displayName).join("\n")}`,
       components: interaction.message.components
     });
   }
 
-  // Start Game
-  if (interaction.customId === "start_game") {
-    const cat = draft.draftText.parent;
+  // ---------- START GAME ----------
+  if (interaction.customId === "start") {
+    const cat = draft.text.parent;
 
-    draft.vcCount++;
     const t1VC = await guild.channels.create({
-      name: `Draft VC ${draft.vcCount} - Hosted by ${member.user.username}`,
+      name: `Draft VC 1 hosted by ${member.displayName}`,
       type: ChannelType.GuildVoice,
       parent: cat?.id,
       userLimit: draft.team1.length
     });
-    draft.vcCount++;
+
     const t2VC = await guild.channels.create({
-      name: `Draft VC ${draft.vcCount} - Hosted by ${member.user.username}`,
+      name: `Draft VC 2 hosted by ${member.displayName}`,
       type: ChannelType.GuildVoice,
       parent: cat?.id,
       userLimit: draft.team2.length
     });
 
-    draft.tempVCs.push(t1VC, t2VC);
+    draft.tempVCs = [t1VC, t2VC];
 
     for (const p of draft.team1) await p.voice.setChannel(t1VC).catch(() => {});
     for (const p of draft.team2) await p.voice.setChannel(t2VC).catch(() => {});
@@ -185,12 +231,28 @@ client.on("interactionCreate", async interaction => {
     return interaction.reply({ content: "▶️ Game started.", ephemeral: true });
   }
 
-  // End / Win
-  if (["end_game", "t1_win", "t2_win"].includes(interaction.customId)) {
-    const winTeam = interaction.customId === "t1_win" ? draft.team1 : interaction.customId === "t2_win" ? draft.team2 : null;
-    const loseTeam = interaction.customId === "t1_win" ? draft.team2 : interaction.customId === "t2_win" ? draft.team1 : null;
+  // ---------- END / WIN ----------
+  if (["end", "t1", "t2"].includes(interaction.customId)) {
+    const winTeam =
+      interaction.customId === "t1" ? draft.team1 :
+      interaction.customId === "t2" ? draft.team2 : null;
+
+    const loseTeam =
+      interaction.customId === "t1" ? draft.team2 :
+      interaction.customId === "t2" ? draft.team1 : null;
 
     if (winTeam) {
+      const winEmbed = new EmbedBuilder()
+        .setTitle("🏆 Draft Result")
+        .setDescription(
+          `**${interaction.customId === "t1" ? "Team 1" : "Team 2"} Wins!**\n\n` +
+          winTeam.map(m => m.displayName).join("\n")
+        )
+        .setColor(interaction.customId === "t1" ? TEAM1_COLOR : TEAM2_COLOR)
+        .setTimestamp();
+
+      await draft.text.send({ embeds: [winEmbed] });
+
       for (const m of winTeam) {
         m.stats ??= { wins: 0, losses: 0, streak: 0 };
         m.stats.wins++; m.stats.streak++;
@@ -204,14 +266,13 @@ client.on("interactionCreate", async interaction => {
     }
 
     for (const p of [...draft.team1, ...draft.team2]) {
-      const vcId = draft.originalVCs[p.id];
-      if (vcId) await p.voice.setChannel(vcId).catch(() => {});
+      await p.voice.setChannel(draft.originalVC).catch(() => {});
     }
 
     for (const vc of draft.tempVCs) await vc.delete().catch(() => {});
-    await draft.draftText.delete().catch(() => {});
-    await draft.draftRole.delete().catch(() => {});
-    drafts.delete(interaction.channel.id);
+    await draft.text.delete().catch(() => {});
+    await draft.role.delete().catch(() => {});
+    drafts.delete(draft.originalVC.id);
 
     return interaction.reply({ content: "✅ Draft finished.", ephemeral: true });
   }
@@ -219,4 +280,10 @@ client.on("interactionCreate", async interaction => {
 
 // ---------- LOGIN ----------
 client.login(process.env.TOKEN);
+
+// ---------- KEEP ALIVE ----------
+const express = require("express");
+const app = express();
+app.get("/", (req, res) => res.send("Bot is alive"));
+app.listen(5000, () => console.log("Express server running"));
 
